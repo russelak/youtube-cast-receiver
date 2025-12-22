@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>YouTube Cast Receiver</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        
+        #player {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 48px;
+            text-align: center;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 30px;
+            border-radius: 10px;
+        }
+    </style>
+    
+    <!-- Cast Receiver Framework -->
+    <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body>
+    <div id="status">Waiting for video...</div>
+    <div id="player"></div>
+    
+    <!-- YouTube IFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    
+    <script>
+        console.log('YouTube Cast Receiver initializing...');
+        
+        const context = cast.framework.CastReceiverContext.getInstance();
+        const CUSTOM_NAMESPACE = 'urn:x-cast:com.youtube.cast';
+        
+        let ytPlayer = null;
+        let statusDiv = document.getElementById('status');
+        let playerDiv = document.getElementById('player');
+        let isPlayerPaused = false; // Track player pause state
+        
+        // Function to send player state updates to Android app (for UI sync only)
+        // NOTE: We no longer send "ended" messages - RemoteMediaClient handles video end detection
+        // This prevents race conditions and conflicts between receiver and Android app auto-play logic
+        function sendPlayerStateUpdate(state) {
+            try {
+                // Only send playing/paused states for UI sync, not "ended"
+                // The Android app's RemoteMediaClient listener detects video end via IDLE_REASON_FINISHED
+                if (state === 'playing' || state === 'paused') {
+                    const message = JSON.stringify({ playerState: state });
+                    console.log('Sending player state update to Android:', message);
+                    context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                } else {
+                    console.log('Skipping state update (not playing/paused):', state);
+                }
+            } catch (error) {
+                console.error('Error sending player state update:', error);
+            }
+        }
+        
+        // Function to send ready message to sender
+        function sendReadyMessage() {
+            try {
+                // Send ready message via broadcast
+                const readyMessage = JSON.stringify({ type: 'ready', status: 'YouTube API loaded' });
+                // Note: Cast Receiver Framework doesn't have direct message sending back to sender
+                // We'll rely on the Android app's timeout mechanism
+                console.log('Receiver ready - YouTube API loaded');
+            } catch (error) {
+                console.error('Error sending ready message:', error);
+            }
+        }
+        
+        // Initialize YouTube Player when API is ready
+        window.onYouTubeIframeAPIReady = function() {
+            console.log('YouTube IFrame API Ready');
+            statusDiv.textContent = 'Ready to Cast YouTube Videos';
+            sendReadyMessage();
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 3000);
+        };
+        
+        // Listen for custom messages from the Android app
+        context.addCustomMessageListener(CUSTOM_NAMESPACE, function(customEvent) {
+            console.log('Received custom message:', customEvent.data);
+            
+            try {
+                const data = typeof customEvent.data === 'string' 
+                    ? JSON.parse(customEvent.data) 
+                    : customEvent.data;
+                
+                console.log('Parsed data:', data);
+                
+                // Handle ping message (receiver ready check)
+                if (data.type === 'ping') {
+                    console.log('Received ping - receiver is ready!');
+                    // Receiver is ready, just acknowledge
+                    return;
+                }
+                
+                // Handle video playback
+                if (data.videoId) {
+                    playVideo(data.videoId, data.title || 'YouTube Video');
+                }
+                
+                // Handle pause/resume
+                if (data.action === 'pause') {
+                    console.log('Received pause action');
+                    if (ytPlayer) {
+                        try {
+                            console.log('Pausing video via YouTube player');
+                            ytPlayer.pauseVideo();
+                            isPlayerPaused = true;
+                            console.log('Video paused successfully');
+                        } catch (error) {
+                            console.error('Error pausing video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot pause - YouTube player not initialized');
+                        // Set flag so when player is ready, it won't autoplay
+                        isPlayerPaused = true;
+                    }
+                } else if (data.action === 'play') {
+                    console.log('Received play action');
+                    if (ytPlayer) {
+                        try {
+                            console.log('Resuming video via YouTube player');
+                            ytPlayer.playVideo();
+                            isPlayerPaused = false;
+                            console.log('Video resumed successfully');
+                        } catch (error) {
+                            console.error('Error resuming video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot resume - YouTube player not initialized');
+                        // Clear flag so when player is ready, it will autoplay
+                        isPlayerPaused = false;
+                    }
+                } else if (data.action === 'seek' && typeof data.seconds === 'number') {
+                    console.log('Received seek action - seconds:', data.seconds);
+                    if (ytPlayer) {
+                        try {
+                            // Get current time and calculate new time
+                            const currentTime = ytPlayer.getCurrentTime();
+                            const newTime = Math.max(0, currentTime + data.seconds); // Ensure non-negative
+                            console.log('Seeking from', currentTime, 'to', newTime);
+                            ytPlayer.seekTo(newTime, true); // true = allowSeekAhead
+                            console.log('Video seeked successfully');
+                        } catch (error) {
+                            console.error('Error seeking video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot seek - YouTube player not initialized');
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing message:', error);
+                statusDiv.textContent = 'Error: Invalid message format';
+                statusDiv.style.display = 'block';
+            }
+        });
+        
+        // Play YouTube video
+        function playVideo(videoId, title) {
+            console.log('Playing video:', videoId, 'Title:', title);
+            statusDiv.textContent = 'Loading: ' + title;
+            statusDiv.style.display = 'block';
+            
+            if (ytPlayer) {
+                // Player already exists, just load new video
+                console.log('Reusing existing player');
+                isPlayerPaused = false; // Reset pause state when loading new video
+                ytPlayer.loadVideoById(videoId);
+            } else {
+                // Create new player
+                console.log('Creating new YouTube player');
+                isPlayerPaused = false; // Reset pause state for new player
+                ytPlayer = new YT.Player('player', {
+                    width: '100%',
+                    height: '100%',
+                    videoId: videoId,
+                    playerVars: {
+                        'autoplay': 1,
+                        'controls': 1,
+                        'rel': 0,
+                        'showinfo': 0,
+                        'modestbranding': 1,
+                        'fs': 1
+                    },
+                    events: {
+                        'onReady': function(event) {
+                            console.log('YouTube Player ready');
+                            if (!isPlayerPaused) {
+                                event.target.playVideo();
+                            } else {
+                                console.log('Player is paused, not auto-playing');
+                            }
+                            statusDiv.style.display = 'none';
+                        },
+                        'onStateChange': function(event) {
+                            console.log('Player state changed:', event.data);
+                            // -1: unstarted, 0: ended, 1: playing, 2: paused, 3: buffering, 5: video cued
+                            if (event.data === 1) {
+                                // Playing
+                                isPlayerPaused = false;
+                                statusDiv.style.display = 'none';
+                                // Send state update to Android app for UI sync
+                                console.log('Video is playing - sending state update');
+                                sendPlayerStateUpdate('playing');
+                            } else if (event.data === 2) {
+                                // Paused
+                                isPlayerPaused = true;
+                                console.log('Player paused');
+                                // Send state update to Android app for UI sync
+                                sendPlayerStateUpdate('paused');
+                            } else if (event.data === 3) {
+                                // Buffering
+                                statusDiv.textContent = 'Buffering...';
+                                statusDiv.style.display = 'block';
+                            } else if (event.data === 0) {
+                                // Ended - REMOVED auto-play notification to prevent conflicts
+                                // The Android app's RemoteMediaClient listener will detect video end
+                                // via IDLE_REASON_FINISHED, which is more reliable
+                                console.log('Video ended - Android app will detect via RemoteMediaClient');
+                                statusDiv.textContent = 'Video Ended';
+                                statusDiv.style.display = 'block';
+                                // DO NOT send "ended" message - let RemoteMediaClient handle it
+                            }
+                        },
+                        'onError': function(event) {
+                            console.error('YouTube Player error:', event.data);
+                            let errorMsg = 'Error loading video';
+                            switch(event.data) {
+                                case 2:
+                                    errorMsg = 'Invalid video ID';
+                                    break;
+                                case 5:
+                                    errorMsg = 'HTML5 player error';
+                                    break;
+                                case 100:
+                                    errorMsg = 'Video not found';
+                                    break;
+                                case 101:
+                                case 150:
+                                    errorMsg = 'Video cannot be embedded';
+                                    break;
+                            }
+                            statusDiv.textContent = errorMsg;
+                            statusDiv.style.display = 'block';
+                        }
+                    }
+                });
+            }
+        }
+        
+        // Start the Cast Receiver
+        const options = {
+            statusText: 'YouTube Cast Receiver Ready',
+            maxInactivity: 86400, // 24 hours
+            disableIdleTimeout: true  // Disable automatic timeout
+        };
+        
+        context.start(options);
+        console.log('Cast Receiver started with options:', options);
+        
+        // Keep connection alive by sending periodic heartbeat
+        setInterval(() => {
+            if (context.getSenders().length > 0) {
+                console.log('Heartbeat: Connection active');
+            }
+        }, 30000); // Every 30 seconds
+        
+        // Log when sender connects
+        context.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function(event) {
+            console.log('Sender connected:', event.senderId);
+            statusDiv.textContent = 'Connected! Waiting for video...';
+            statusDiv.style.display = 'block';
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 2000);
+        });
+        
+        // Log when sender disconnects
+        context.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function(event) {
+            console.log('Sender disconnected:', event.senderId);
+            if (context.getSenders().length === 0) {
+                console.log('All senders disconnected');
+            }
+        });
+    </script>
+</body>
+</html>
+
