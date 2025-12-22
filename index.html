@@ -69,7 +69,14 @@
                 if (state === 'playing' || state === 'paused') {
                     const message = JSON.stringify({ playerState: state });
                     console.log('Sending player state update to Android:', message);
-                    context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                    
+                    // Check if running on actual Chromecast device
+                    if (context && typeof context.broadcastCustomMessage === 'function') {
+                        context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                    } else {
+                        // Running locally - log for testing purposes
+                        console.log('⚠️ Local testing mode - message would be sent:', message);
+                    }
                 } else {
                     console.log('Skipping state update (not playing/paused):', state);
                 }
@@ -89,23 +96,38 @@
                             playerState: 'position',
                             position: positionSeconds 
                         });
-                        context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                        console.log('📊 Sending position update:', message, 'Time:', currentTime);
+                        
+                        // Check if running on actual Chromecast device
+                        if (context && typeof context.broadcastCustomMessage === 'function') {
+                            context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                        } else {
+                            // Running locally - log for testing purposes
+                            console.log('⚠️ Local testing mode - message would be sent:', message);
+                        }
+                    } else {
+                        console.warn('⚠️ Cannot get current time - player not ready or time invalid:', currentTime);
                     }
+                } else {
+                    console.warn('⚠️ Cannot send position - player not ready or getCurrentTime not available');
                 }
             } catch (error) {
-                console.error('Error sending position update:', error);
+                console.error('❌ Error sending position update:', error);
             }
         }
         
         // Start sending position updates every second when video is playing
         function startPositionUpdates() {
             stopPositionUpdates(); // Clear any existing interval
+            console.log('🔄 Starting position updates - ytPlayer:', !!ytPlayer, 'isPlayerPaused:', isPlayerPaused);
             positionUpdateInterval = setInterval(function() {
                 if (ytPlayer && !isPlayerPaused) {
                     sendPositionUpdate();
+                } else {
+                    console.log('⏸ Skipping position update - ytPlayer:', !!ytPlayer, 'isPlayerPaused:', isPlayerPaused);
                 }
             }, 1000); // Update every second
-            console.log('Started position updates');
+            console.log('✅ Position updates started');
         }
         
         // Stop sending position updates
@@ -163,12 +185,21 @@
                     if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') {
                         const currentTime = ytPlayer.getCurrentTime() || 0;
                         const positionSeconds = Math.floor(currentTime);
-                        // Send the current time back to the sender
-                        context.sendCustomMessage(CUSTOM_NAMESPACE, customEvent.senderId, JSON.stringify({
+                        // Send the current time back using broadcast (same as automatic updates)
+                        // This ensures consistent message format
+                        const responseMessage = JSON.stringify({
                             action: 'current_time',
                             time: positionSeconds
-                        }));
-                        console.log('Sent current_time:', positionSeconds);
+                        });
+                        
+                        // Check if running on actual Chromecast device
+                        if (context && typeof context.broadcastCustomMessage === 'function') {
+                            context.broadcastCustomMessage(CUSTOM_NAMESPACE, responseMessage);
+                            console.log('Sent current_time:', positionSeconds, 'Message:', responseMessage);
+                        } else {
+                            // Running locally - log for testing purposes
+                            console.log('⚠️ Local testing mode - current_time response would be sent:', responseMessage);
+                        }
                     }
                     return;
                 }
@@ -246,6 +277,11 @@
                 console.log('Reusing existing player');
                 isPlayerPaused = false; // Reset pause state when loading new video
                 ytPlayer.loadVideoById(videoId);
+                // Start position updates after loading new video
+                setTimeout(function() {
+                    console.log('🔄 Starting position updates after loadVideoById');
+                    startPositionUpdates();
+                }, 2000); // Wait 2 seconds for video to start
             } else {
                 // Create new player
                 console.log('Creating new YouTube player');
@@ -267,6 +303,11 @@
                             console.log('YouTube Player ready');
                             if (!isPlayerPaused) {
                                 event.target.playVideo();
+                                // Start position updates when video starts playing
+                                setTimeout(function() {
+                                    console.log('🔄 Starting position updates from onReady');
+                                    startPositionUpdates();
+                                }, 2000); // Wait 2 seconds for video to start
                             } else {
                                 console.log('Player is paused, not auto-playing');
                             }
