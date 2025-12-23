@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>YouTube Cast Receiver</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            background: #000;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        
+        #player {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+        
+        #status {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: white;
+            font-size: 48px;
+            text-align: center;
+            z-index: 10;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 30px;
+            border-radius: 10px;
+        }
+    </style>
+    
+    <!-- Cast Receiver Framework -->
+    <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
+</head>
+<body>
+    <div id="status">Waiting for video...</div>
+    <div id="player"></div>
+    
+    <!-- YouTube IFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    
+    <script>
+        // Version identifier for cache-busting (update this when deploying changes)
+        const RECEIVER_VERSION = '2024-12-23-v2';
+        console.log('YouTube Cast Receiver initializing...');
+        console.log('📺 Receiver Version:', RECEIVER_VERSION);
+        console.log('📺 Receiver URL:', window.location.href);
+        
+        const context = cast.framework.CastReceiverContext.getInstance();
+        const CUSTOM_NAMESPACE = 'urn:x-cast:com.youtube.cast';
+        console.log('📺 Custom Namespace:', CUSTOM_NAMESPACE);
+        
+        let ytPlayer = null;
+        let statusDiv = document.getElementById('status');
+        let playerDiv = document.getElementById('player');
+        let isPlayerPaused = false; // Track player pause state
+        let positionUpdateInterval = null; // Interval for sending position updates
+        
+        // Function to send player state updates to Android app
+        // UPDATED: Now supports 'ended' to trigger Android auto-play logic as a backup mechanism
+        // The Android app uses both RemoteMediaClient (primary) and custom "ended" messages (backup)
+        function sendPlayerStateUpdate(state) {
+            try {
+                if (state === 'playing' || state === 'paused' || state === 'ended') {
+                    const message = JSON.stringify({ playerState: state });
+                    console.log('📤 RECEIVER: Sending player state update to Android:', message);
+                    console.log('📤 RECEIVER: State:', state, 'Namespace:', CUSTOM_NAMESPACE);
+                    
+                    // Check if running on actual Chromecast device
+                    if (context && typeof context.broadcastCustomMessage === 'function') {
+                        console.log('📤 RECEIVER: Calling broadcastCustomMessage for state:', state);
+                        context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                        console.log('📤 RECEIVER: broadcastCustomMessage called successfully for state:', state);
+                    } else {
+                        // Running locally - log for testing purposes
+                        console.log('⚠️ RECEIVER: Local testing mode - message would be sent:', message);
+                    }
+                } else {
+                    console.log('⚠️ RECEIVER: Skipping state update (not playing/paused/ended):', state);
+                }
+            } catch (error) {
+                console.error('❌ RECEIVER: Error sending player state update:', error);
+                console.error('❌ RECEIVER: Error stack:', error.stack);
+            }
+        }
+        
+        // Function to send position updates to Android app
+        function sendPositionUpdate() {
+            try {
+                if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') {
+                    const currentTime = ytPlayer.getCurrentTime();
+                    if (currentTime !== null && currentTime >= 0) {
+                        const positionSeconds = Math.floor(currentTime);
+                        const message = JSON.stringify({ 
+                            playerState: 'position',
+                            position: positionSeconds 
+                        });
+                        console.log('📊 RECEIVER: Sending position update:', message, 'Time:', currentTime);
+                        
+                        // Check if running on actual Chromecast device
+                        if (context && typeof context.broadcastCustomMessage === 'function') {
+                            console.log('📊 RECEIVER: Calling broadcastCustomMessage with namespace:', CUSTOM_NAMESPACE);
+                            context.broadcastCustomMessage(CUSTOM_NAMESPACE, message);
+                            console.log('📊 RECEIVER: broadcastCustomMessage called successfully');
+                        } else {
+                            // Running locally - log for testing purposes
+                            console.log('⚠️ RECEIVER: Local testing mode - message would be sent:', message);
+                        }
+                    } else {
+                        console.warn('⚠️ RECEIVER: Cannot get current time - player not ready or time invalid:', currentTime);
+                    }
+                } else {
+                    console.warn('⚠️ RECEIVER: Cannot send position - player not ready or getCurrentTime not available');
+                    console.warn('⚠️ RECEIVER: ytPlayer exists:', !!ytPlayer, 'getCurrentTime available:', ytPlayer && typeof ytPlayer.getCurrentTime === 'function');
+                }
+            } catch (error) {
+                console.error('❌ RECEIVER: Error sending position update:', error);
+                console.error('❌ RECEIVER: Error stack:', error.stack);
+            }
+        }
+        
+        // Start sending position updates every second when video is playing
+        function startPositionUpdates() {
+            stopPositionUpdates(); // Clear any existing interval
+            console.log('🔄 Starting position updates - ytPlayer:', !!ytPlayer, 'isPlayerPaused:', isPlayerPaused);
+            positionUpdateInterval = setInterval(function() {
+                if (ytPlayer && !isPlayerPaused) {
+                    sendPositionUpdate();
+                } else {
+                    console.log('⏸ Skipping position update - ytPlayer:', !!ytPlayer, 'isPlayerPaused:', isPlayerPaused);
+                }
+            }, 1000); // Update every second
+            console.log('✅ Position updates started');
+        }
+        
+        // Stop sending position updates
+        function stopPositionUpdates() {
+            if (positionUpdateInterval) {
+                clearInterval(positionUpdateInterval);
+                positionUpdateInterval = null;
+                console.log('Stopped position updates');
+            }
+        }
+        
+        // Function to send ready message to sender
+        function sendReadyMessage() {
+            try {
+                // Send ready message via broadcast
+                const readyMessage = JSON.stringify({ type: 'ready', status: 'YouTube API loaded' });
+                // Note: Cast Receiver Framework doesn't have direct message sending back to sender
+                // We'll rely on the Android app's timeout mechanism
+                console.log('Receiver ready - YouTube API loaded');
+            } catch (error) {
+                console.error('Error sending ready message:', error);
+            }
+        }
+        
+        // Initialize YouTube Player when API is ready
+        window.onYouTubeIframeAPIReady = function() {
+            console.log('YouTube IFrame API Ready');
+            statusDiv.textContent = 'Ready to Cast YouTube Videos';
+            sendReadyMessage();
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 3000);
+        };
+        
+        // Listen for custom messages from the Android app
+        context.addCustomMessageListener(CUSTOM_NAMESPACE, function(customEvent) {
+            console.log('📨 RECEIVER: Received custom message:', customEvent.data);
+            console.log('📨 RECEIVER: Message type:', typeof customEvent.data);
+            console.log('📨 RECEIVER: Sender ID:', customEvent.senderId);
+            
+            try {
+                const data = typeof customEvent.data === 'string' 
+                    ? JSON.parse(customEvent.data) 
+                    : customEvent.data;
+                
+                console.log('📨 RECEIVER: Parsed data:', JSON.stringify(data));
+                
+                // Handle ping message (receiver ready check)
+                if (data.type === 'ping') {
+                    console.log('Received ping - receiver is ready!');
+                    // Receiver is ready, just acknowledge
+                    return;
+                }
+                
+                // Handle get_time request (request-response pattern for position)
+                if (data.action === 'get_time') {
+                    if (ytPlayer && typeof ytPlayer.getCurrentTime === 'function') {
+                        const currentTime = ytPlayer.getCurrentTime() || 0;
+                        const positionSeconds = Math.floor(currentTime);
+                        // Send the current time back using broadcast (same as automatic updates)
+                        // This ensures consistent message format
+                        const responseMessage = JSON.stringify({
+                            action: 'current_time',
+                            time: positionSeconds
+                        });
+                        
+                        // Check if running on actual Chromecast device
+                        if (context && typeof context.broadcastCustomMessage === 'function') {
+                            context.broadcastCustomMessage(CUSTOM_NAMESPACE, responseMessage);
+                            console.log('Sent current_time:', positionSeconds, 'Message:', responseMessage);
+                        } else {
+                            // Running locally - log for testing purposes
+                            console.log('⚠️ Local testing mode - current_time response would be sent:', responseMessage);
+                        }
+                    }
+                    return;
+                }
+                
+                // Handle video playback
+                if (data.videoId) {
+                    console.log('📨 RECEIVER: Processing video load request - Video ID:', data.videoId, 'Title:', data.title);
+                    
+                    // Send confirmation message back to Android app
+                    try {
+                        const confirmMessage = JSON.stringify({
+                            action: 'video_received',
+                            videoId: data.videoId,
+                            title: data.title || 'YouTube Video'
+                        });
+                        console.log('📤 RECEIVER: Sending video received confirmation:', confirmMessage);
+                        if (context && typeof context.broadcastCustomMessage === 'function') {
+                            context.broadcastCustomMessage(CUSTOM_NAMESPACE, confirmMessage);
+                            console.log('📤 RECEIVER: Video received confirmation sent successfully');
+                        } else {
+                            console.log('⚠️ RECEIVER: Cannot send confirmation - broadcastCustomMessage not available');
+                        }
+                    } catch (error) {
+                        console.error('❌ RECEIVER: Error sending confirmation:', error);
+                    }
+                    
+                    playVideo(data.videoId, data.title || 'YouTube Video');
+                }
+                
+                // Handle pause/resume
+                if (data.action === 'pause') {
+                    console.log('Received pause action');
+                    if (ytPlayer) {
+                        try {
+                            console.log('Pausing video via YouTube player');
+                            ytPlayer.pauseVideo();
+                            isPlayerPaused = true;
+                            console.log('Video paused successfully');
+                        } catch (error) {
+                            console.error('Error pausing video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot pause - YouTube player not initialized');
+                        // Set flag so when player is ready, it won't autoplay
+                        isPlayerPaused = true;
+                    }
+                } else if (data.action === 'play') {
+                    console.log('Received play action');
+                    if (ytPlayer) {
+                        try {
+                            console.log('Resuming video via YouTube player');
+                            ytPlayer.playVideo();
+                            isPlayerPaused = false;
+                            console.log('Video resumed successfully');
+                        } catch (error) {
+                            console.error('Error resuming video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot resume - YouTube player not initialized');
+                        // Clear flag so when player is ready, it will autoplay
+                        isPlayerPaused = false;
+                    }
+                } else if (data.action === 'seek' && typeof data.seconds === 'number') {
+                    console.log('Received seek action - seconds:', data.seconds);
+                    if (ytPlayer) {
+                        try {
+                            // Get current time and calculate new time
+                            const currentTime = ytPlayer.getCurrentTime();
+                            const newTime = Math.max(0, currentTime + data.seconds); // Ensure non-negative
+                            console.log('Seeking from', currentTime, 'to', newTime);
+                            ytPlayer.seekTo(newTime, true); // true = allowSeekAhead
+                            console.log('Video seeked successfully');
+                        } catch (error) {
+                            console.error('Error seeking video:', error);
+                        }
+                    } else {
+                        console.warn('Cannot seek - YouTube player not initialized');
+                    }
+                }
+            } catch (error) {
+                console.error('Error parsing message:', error);
+                statusDiv.textContent = 'Error: Invalid message format';
+                statusDiv.style.display = 'block';
+            }
+        });
+        
+        // Play YouTube video
+        function playVideo(videoId, title) {
+            console.log('Playing video:', videoId, 'Title:', title);
+            statusDiv.textContent = 'Loading: ' + title;
+            statusDiv.style.display = 'block';
+            
+            if (ytPlayer) {
+                // Player already exists, just load new video
+                console.log('Reusing existing player');
+                isPlayerPaused = false; // Reset pause state when loading new video
+                ytPlayer.loadVideoById(videoId);
+                // Start position updates after loading new video
+                setTimeout(function() {
+                    console.log('🔄 Starting position updates after loadVideoById');
+                    startPositionUpdates();
+                }, 2000); // Wait 2 seconds for video to start
+            } else {
+                // Create new player
+                console.log('Creating new YouTube player');
+                isPlayerPaused = false; // Reset pause state for new player
+                ytPlayer = new YT.Player('player', {
+                    width: '100%',
+                    height: '100%',
+                    videoId: videoId,
+                    playerVars: {
+                        'autoplay': 1,
+                        'controls': 1,
+                        'rel': 0,
+                        'showinfo': 0,
+                        'modestbranding': 1,
+                        'fs': 1
+                    },
+                    events: {
+                        'onReady': function(event) {
+                            console.log('YouTube Player ready');
+                            if (!isPlayerPaused) {
+                                event.target.playVideo();
+                                // Start position updates when video starts playing
+                                setTimeout(function() {
+                                    console.log('🔄 Starting position updates from onReady');
+                                    startPositionUpdates();
+                                }, 2000); // Wait 2 seconds for video to start
+                            } else {
+                                console.log('Player is paused, not auto-playing');
+                            }
+                            statusDiv.style.display = 'none';
+                        },
+                        'onStateChange': function(event) {
+                            console.log('Player state changed:', event.data);
+                            // -1: unstarted, 0: ended, 1: playing, 2: paused, 3: buffering, 5: video cued
+                            if (event.data === 1) {
+                                // Playing
+                                isPlayerPaused = false;
+                                statusDiv.style.display = 'none';
+                                // Send state update to Android app for UI sync
+                                console.log('Video is playing - sending state update');
+                                sendPlayerStateUpdate('playing');
+                                // Start sending position updates
+                                startPositionUpdates();
+                            } else if (event.data === 2) {
+                                // Paused
+                                isPlayerPaused = true;
+                                console.log('Player paused');
+                                // Send state update to Android app for UI sync
+                                sendPlayerStateUpdate('paused');
+                                // Stop sending position updates
+                                stopPositionUpdates();
+                            } else if (event.data === 3) {
+                                // Buffering
+                                statusDiv.textContent = 'Buffering...';
+                                statusDiv.style.display = 'block';
+                            } else if (event.data === 0) {
+                                // Ended - Send "ended" message to Android app as backup trigger
+                                // The Android app uses both RemoteMediaClient (primary) and this custom message (backup)
+                                console.log('Video ended - sending "ended" message to Android app');
+                                sendPlayerStateUpdate('ended');
+                                statusDiv.textContent = 'Video Ended';
+                                statusDiv.style.display = 'block';
+                                stopPositionUpdates(); // Stop position updates when video ends
+                            }
+                        },
+                        'onError': function(event) {
+                            console.error('YouTube Player error:', event.data);
+                            let errorMsg = 'Error loading video';
+                            switch(event.data) {
+                                case 2:
+                                    errorMsg = 'Invalid video ID';
+                                    break;
+                                case 5:
+                                    errorMsg = 'HTML5 player error';
+                                    break;
+                                case 100:
+                                    errorMsg = 'Video not found';
+                                    break;
+                                case 101:
+                                case 150:
+                                    errorMsg = 'Video cannot be embedded';
+                                    break;
+                            }
+                            statusDiv.textContent = errorMsg;
+                            statusDiv.style.display = 'block';
+                        }
+                    }
+                });
+            }
+        }
+        
+        // Start the Cast Receiver
+        const options = {
+            statusText: 'YouTube Cast Receiver Ready',
+            maxInactivity: 86400, // 24 hours
+            disableIdleTimeout: true,  // Disable automatic timeout
+            // Enable remote debugging (allows chrome://inspect to connect)
+            supportedCommands: cast.framework.messages.Command.ALL_BASIC_MEDIA,
+            // Enable debug logging
+            debugConfig: {
+                logLevel: cast.framework.LoggerLevel.DEBUG
+            }
+        };
+        
+        context.start(options);
+        console.log('Cast Receiver started with options:', options);
+        console.log('🔍 Remote debugging should be available at chrome://inspect');
+        
+        // Keep connection alive by sending periodic heartbeat
+        setInterval(() => {
+            if (context.getSenders().length > 0) {
+                console.log('Heartbeat: Connection active');
+            }
+        }, 30000); // Every 30 seconds
+        
+        // Log when sender connects
+        context.addEventListener(cast.framework.system.EventType.SENDER_CONNECTED, function(event) {
+            console.log('Sender connected:', event.senderId);
+            statusDiv.textContent = 'Connected! Waiting for video...';
+            statusDiv.style.display = 'block';
+            setTimeout(() => {
+                statusDiv.style.display = 'none';
+            }, 2000);
+        });
+        
+        // Log when sender disconnects
+        context.addEventListener(cast.framework.system.EventType.SENDER_DISCONNECTED, function(event) {
+            console.log('Sender disconnected:', event.senderId);
+            if (context.getSenders().length === 0) {
+                console.log('All senders disconnected');
+            }
+        });
+    </script>
+</body>
+</html>
+
